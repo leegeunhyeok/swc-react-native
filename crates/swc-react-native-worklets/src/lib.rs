@@ -20,7 +20,7 @@ use swc_ecma_visit::visit_mut_pass;
 #[doc(hidden)]
 pub use visitor::WorkletsVisitor;
 
-pub use options::WorkletsOptions;
+pub use options::{HbcBinaryResolver, WorkletsOptions};
 
 pub fn worklets(cm: Lrc<SourceMap>, options: WorkletsOptions) -> impl Pass {
     visit_mut_pass(visitor::WorkletsVisitor::new(options).with_source_map(cm))

@@ -16,4 +16,6 @@ pub use swc_react_native_hermes_v1_fixes::{
 };
 
 #[cfg(feature = "worklets")]
-pub use swc_react_native_worklets::{worklets, WorkletsOptions, WorkletsVisitor};
+pub use swc_react_native_worklets::{
+    worklets, HbcBinaryResolver, WorkletsOptions, WorkletsVisitor,
+};

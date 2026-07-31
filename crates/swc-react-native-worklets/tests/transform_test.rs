@@ -49,6 +49,47 @@ function add(a, b) {
 }
 
 #[test]
+fn default_options_keep_source_string_worklets() {
+    let code = r#"
+function fn() {
+  'worklet';
+  return 1;
+}
+"#;
+    let out = transform_fixture("Sample.ts", code, options_with_version());
+
+    assert_contains(&out, "code: \"(function");
+    assert_contains(&out, "\"use no memo\";");
+    assert_not_contains(&out, "bytecode:");
+    insta::assert_snapshot!(out);
+}
+
+fn configured_hbc_binary() -> String {
+    "hermesc".to_string()
+}
+
+#[test]
+#[should_panic(
+    expected = "react-native-worklets hermesBytecode is not supported by swc-react-native-worklets"
+)]
+fn hermes_bytecode_option_is_rejected() {
+    let code = r#"
+function fn() {
+  'worklet';
+  return 1;
+}
+"#;
+    let mut options: WorkletsOptions = serde_json::from_value(serde_json::json!({
+        "hermesBytecode": true,
+        "pluginVersion": "test"
+    }))
+    .expect("hermesBytecode options should deserialize");
+    options.get_hbc_binary = Some(configured_hbc_binary);
+
+    let _ = transform_fixture("Sample.ts", code, options);
+}
+
+#[test]
 fn worklet_arrow_assigned_to_variable() {
     let code = r#"
 const square = (x) => {
@@ -261,6 +302,46 @@ class Plain {
     assert_not_contains(&out, "__workletHash");
     assert_not_contains(&out, "__initData");
 
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn class_method_directives_are_workletized() {
+    let code = r#"
+class Example {
+  constructor(value) {
+    'worklet';
+    this.value = value;
+  }
+
+  method(value) {
+    'worklet';
+    return value;
+  }
+
+  get current() {
+    'worklet';
+    return this.value;
+  }
+
+  set current(value) {
+    'worklet';
+    this.value = value;
+  }
+
+  static run() {
+    'worklet';
+    return 1;
+  }
+}
+"#;
+    let out = transform_fixture("Sample.ts", code, options_with_version());
+
+    assert_contains(&out, "constructor = (function");
+    assert_contains(&out, "method = (function");
+    assert_contains(&out, "current = (function");
+    assert_contains(&out, "static run = (function");
+    assert_not_contains(&out, "'worklet'");
     insta::assert_snapshot!(out);
 }
 
@@ -842,20 +923,21 @@ fn extract_factory_iife_destructure(out: &str, factory_name: &str) -> Option<Str
     let factory_start = format!("const {factory_name} =");
     let start = out.find(&factory_start)?;
     let tail = &out[start..];
-    // Find the `})(` that closes the factory factory and opens the IIFE call.
-    let close_marker = "})(";
-    let close = tail.find(close_marker)?;
-    let after_open = close + close_marker.len();
-    let end_marker = ");";
-    let end_rel = tail[after_open..].find(end_marker)?;
-    Some(tail[after_open..after_open + end_rel].to_string())
+    // Read the outer factory's destructured parameter directly. Looking for
+    // the closing `})(` is ambiguous once a class contains nested worklet
+    // factories (for example, a workletized constructor).
+    let open_marker = "Factory({";
+    let open = tail.find(open_marker)? + open_marker.len();
+    let close_marker = "}) {";
+    let close = tail[open..].find(close_marker)?;
+    Some(tail[open..open + close].to_string())
 }
 
 /// Whether `name` appears as a destructured property key (not as part of
 /// another identifier or a value position) in the IIFE arg literal.
 fn ident_in_destructure(destructure: &str, name: &str) -> bool {
-    for line in destructure.lines() {
-        let trimmed = line.trim().trim_end_matches([',', ' ']);
+    for entry in destructure.split(',') {
+        let trimmed = entry.trim();
         let key = trimmed.split(':').next().unwrap_or("").trim();
         if key == name {
             return true;

@@ -43,6 +43,7 @@ use crate::options::WorkletsOptions;
 use indexmap::IndexSet;
 
 const WORKLET_DIRECTIVE: &str = "worklet";
+const USE_NO_MEMO_DIRECTIVE: &str = "use no memo";
 // Stamped when the caller doesn't supply a real react-native-worklets
 // package version, so the bundle never silently agrees with the runtime.
 const UNKNOWN_VERSION: &str = "unknown";
@@ -52,6 +53,8 @@ const WORKLET_CLASS_MARKER: &str = "__workletClass";
 const GENERATED_WORKLETS_DIR: &str = ".worklets";
 const BUNDLE_MODE_UNSUPPORTED_MESSAGE: &str =
     "react-native-worklets bundleMode is not supported by swc-react-native-worklets";
+const HERMES_BYTECODE_UNSUPPORTED_MESSAGE: &str =
+    "react-native-worklets hermesBytecode is not supported by swc-react-native-worklets";
 
 /// Suffix appended to the original class name to form the factory function
 /// identifier. Matches the upstream babel plugin's
@@ -73,6 +76,10 @@ pub struct WorkletsVisitor {
 
 impl WorkletsVisitor {
     pub fn new(options: WorkletsOptions) -> Self {
+        if options.hermes_bytecode {
+            panic!("{HERMES_BYTECODE_UNSUPPORTED_MESSAGE}");
+        }
+
         let mut globals: FxHashSet<Atom> = DEFAULT_GLOBALS.iter().map(|s| Atom::from(*s)).collect();
         for g in &options.globals {
             globals.insert(Atom::from(g.as_str()));
@@ -209,6 +216,27 @@ impl WorkletsVisitor {
         });
     }
 
+    fn add_use_no_memo_directive(stmts: &mut Vec<Stmt>) {
+        if stmts
+            .iter()
+            .any(|stmt| str_stmt_value(stmt) == Some(USE_NO_MEMO_DIRECTIVE))
+        {
+            return;
+        }
+
+        let directive_end = stmts
+            .iter()
+            .take_while(|stmt| str_stmt_value(stmt).is_some())
+            .count();
+        stmts.insert(
+            directive_end,
+            Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(str_lit(USE_NO_MEMO_DIRECTIVE)),
+            }),
+        );
+    }
+
     fn is_already_workletized(stmts: &[Stmt]) -> bool {
         stmts.iter().any(|s| {
             if let Stmt::Expr(ExprStmt { expr, .. }) = s {
@@ -231,11 +259,12 @@ impl WorkletsVisitor {
         &mut self,
         func_name: Option<&str>,
         params: Vec<Param>,
-        body: BlockStmt,
+        mut body: BlockStmt,
         mut closure_vars: Vec<Ident>,
         is_generator: bool,
         is_async: bool,
     ) -> Expr {
+        Self::add_use_no_memo_directive(&mut body.stmts);
         let (worklet_name, react_name) = self.next_name(func_name);
 
         // `init_body` is serialized into init_data (UI thread): rename free
@@ -245,6 +274,7 @@ impl WorkletsVisitor {
         // calls leave `this` undefined; recursion there resolves via the
         // function-expression name or the outer `const`.
         let mut init_body = body.clone();
+        init_body.visit_mut_with(&mut StripDirectivePrologues);
         if let Some(orig) = func_name.filter(|n| !n.is_empty()) {
             if orig != worklet_name && rename_free_refs(&mut init_body, orig, &worklet_name) {
                 init_body.stmts.insert(0, const_recur_decl(&worklet_name));
@@ -571,13 +601,8 @@ impl WorkletsVisitor {
     /// because a class field can directly hold an expression value, whereas
     /// a `method() { ... }` slot cannot be replaced by one.
     ///
-    /// Getters, setters and constructors keep their syntactic shape but have
-    /// the `'worklet'` directive stripped and their body registered with the
-    /// factory machinery as a side effect (so `init_data` is still emitted
-    /// at module scope). This is a minimal-viable semantic: the factory call
-    /// isn't wired up into the accessor body, so workletized getters/setters
-    /// won't actually run on the UI thread at call time. Use a class field
-    /// with a `'worklet'` arrow function if you need that behavior.
+    /// Getters, setters, and constructors are also rewritten to class fields,
+    /// matching `processIfWorkletMethod` in the upstream plugin.
     fn workletize_class_body(&mut self, class: &mut Class) {
         // `__workletClass` marker: a class-level opt-in that workletizes every
         // method without requiring a per-method directive. Marker presence
@@ -780,31 +805,21 @@ impl WorkletsVisitor {
             method.function.is_async,
         );
 
-        match method.kind {
-            MethodKind::Method => ClassMember::ClassProp(ClassProp {
-                span: method.span,
-                key: method.key,
-                value: Some(Box::new(factory_call)),
-                type_ann: None,
-                is_static: method.is_static,
-                decorators: vec![],
-                accessibility: method.accessibility,
-                is_abstract: method.is_abstract,
-                is_optional: method.is_optional,
-                is_override: method.is_override,
-                readonly: false,
-                declare: false,
-                definite: false,
-            }),
-            MethodKind::Getter | MethodKind::Setter => {
-                // The factory call was emitted purely for its side effect
-                // (init_data pushed to pending_prepends). The accessor itself
-                // is left alone — see the function-level doc for the
-                // implications.
-                let _ = factory_call;
-                ClassMember::Method(method)
-            }
-        }
+        ClassMember::ClassProp(ClassProp {
+            span: method.span,
+            key: method.key,
+            value: Some(Box::new(factory_call)),
+            type_ann: None,
+            is_static: method.is_static,
+            decorators: vec![],
+            accessibility: method.accessibility,
+            is_abstract: method.is_abstract,
+            is_optional: method.is_optional,
+            is_override: method.is_override,
+            readonly: false,
+            declare: false,
+            definite: false,
+        })
     }
 
     fn workletize_class_constructor(&mut self, mut ctor: Constructor) -> ClassMember {
@@ -832,10 +847,23 @@ impl WorkletsVisitor {
             })
             .collect();
         let cv = collect_closure_vars(&params, &body, &self.closure_ctx());
-        // Fire-and-forget: the returned Expr is dropped; the init_data
-        // statement was registered in pending_prepends.
-        let _ = self.make_factory_call(Some("constructor"), params, body, cv, false, false);
-        ClassMember::Constructor(ctor)
+        let factory_call =
+            self.make_factory_call(Some("constructor"), params, body, cv, false, false);
+        ClassMember::ClassProp(ClassProp {
+            span: ctor.span,
+            key: ctor.key,
+            value: Some(Box::new(factory_call)),
+            type_ann: None,
+            is_static: false,
+            decorators: vec![],
+            accessibility: ctor.accessibility,
+            is_abstract: false,
+            is_optional: ctor.is_optional,
+            is_override: false,
+            readonly: false,
+            declare: false,
+            definite: false,
+        })
     }
 
     /// Expand an object literal marked with `__workletContextObject: true`
@@ -3253,6 +3281,24 @@ fn ensure_block_body(arrow: &mut ArrowExpr) {
     }
 }
 
+/// Babel represents directive prologues separately from ordinary string
+/// statements. SWC keeps them in `BlockStmt::stmts`, so remove the leading
+/// string statements from every function block before serializing worklet
+/// source, matching the latest upstream `workletStringCode.ts`.
+struct StripDirectivePrologues;
+
+impl VisitMut for StripDirectivePrologues {
+    fn visit_mut_block_stmt(&mut self, block: &mut BlockStmt) {
+        let directive_end = block
+            .stmts
+            .iter()
+            .take_while(|stmt| str_stmt_value(stmt).is_some())
+            .count();
+        block.stmts.drain(..directive_end);
+        block.visit_mut_children_with(self);
+    }
+}
+
 // Corresponds to `workletStringCode.ts`. Emits the worklet function
 // expression as a source string plus, when a `SourceMap` is available, a
 // JSON source map mapping back to the original node positions.
@@ -3289,13 +3335,14 @@ fn build_worklet_code_and_map(
             return_type: None,
         }),
     });
-    match cm {
+    let (code, source_map) = match cm {
         Some(cm) => emit_expr_with_source_map(&fn_expr, cm, location),
         None => (
             emit_expr_str(&fn_expr, &Lrc::new(SourceMap::default())),
             None,
         ),
-    }
+    };
+    (format!("({code})"), source_map)
 }
 
 fn make_closure_destruct_stmt(cv: &[Ident]) -> Stmt {

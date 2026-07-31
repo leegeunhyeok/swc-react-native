@@ -3,6 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Resolves the Hermes bytecode compiler binary used by the experimental
+/// `hermesBytecode` option.
+pub type HbcBinaryResolver = fn() -> String;
+
 /// Bundle Mode import-forwarding configuration.
 ///
 /// Corresponds to `importForwarding` in the upstream worklets Babel plugin.
@@ -27,6 +31,20 @@ pub struct ImportForwardingOptions {
 pub struct WorkletsOptions {
     /// Identifiers treated as globals — never captured into worklet closures.
     pub globals: Vec<String>,
+
+    /// Request production Legacy Eval worklets as Hermes bytecode.
+    ///
+    /// Retained for upstream option compatibility. The current SWC port does
+    /// not support bytecode generation and rejects this option when enabled.
+    pub hermes_bytecode: bool,
+
+    /// Resolves the Hermes bytecode compiler binary.
+    ///
+    /// Function-valued options cannot be represented in JSON, so this field
+    /// is available to Rust callers and skipped by serde. It remains unused
+    /// while `hermes_bytecode` is unsupported.
+    #[serde(skip)]
+    pub get_hbc_binary: Option<HbcBinaryResolver>,
 
     /// When true, no globals are implicitly captured: identifiers must be
     /// explicitly listed in `globals` to be considered safe.
