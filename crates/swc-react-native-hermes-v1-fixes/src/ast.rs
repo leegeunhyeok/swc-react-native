@@ -1,10 +1,14 @@
 use swc_common::{util::take::Take, SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 
-pub(crate) fn block_from_arrow_body(body: BlockStmtOrExpr) -> BlockStmt {
+pub(crate) fn block_from_arrow_body(body: ArrowFunctionBody) -> BlockStmt {
     match body {
-        BlockStmtOrExpr::BlockStmt(body) => body,
-        BlockStmtOrExpr::Expr(expr) => BlockStmt {
+        ArrowFunctionBody::FunctionBody(body) => BlockStmt {
+            span: body.span,
+            ctxt: SyntaxContext::empty(),
+            stmts: body.stmts,
+        },
+        ArrowFunctionBody::Expr(expr) => BlockStmt {
             span: DUMMY_SP,
             ctxt: SyntaxContext::empty(),
             stmts: vec![Stmt::Return(ReturnStmt {
@@ -12,6 +16,13 @@ pub(crate) fn block_from_arrow_body(body: BlockStmtOrExpr) -> BlockStmt {
                 arg: Some(expr),
             })],
         },
+    }
+}
+
+pub(crate) fn function_body_from_block(body: BlockStmt) -> FunctionBody {
+    FunctionBody {
+        span: body.span,
+        stmts: body.stmts,
     }
 }
 
@@ -43,6 +54,6 @@ pub(crate) fn call_expr(callee: Expr) -> Expr {
     })
 }
 
-pub(crate) fn take_arrow_body(arrow: &mut ArrowExpr) -> BlockStmtOrExpr {
+pub(crate) fn take_arrow_body(arrow: &mut ArrowExpr) -> ArrowFunctionBody {
     *arrow.body.take()
 }

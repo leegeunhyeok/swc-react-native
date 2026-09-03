@@ -5,7 +5,9 @@ use swc_ecma_ast::*;
 use swc_ecma_utils::private_ident;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-use crate::ast::{block_from_arrow_body, call_expr, take_arrow_body, var_decl_stmt};
+use crate::ast::{
+    block_from_arrow_body, call_expr, function_body_from_block, take_arrow_body, var_decl_stmt,
+};
 
 /// Source: https://github.com/expo/expo/blob/d427a802b11d79c8e45be8ceb582ca10fae103af/packages/babel-preset-expo/src/plugins/fix-hermes-v1-async-arrow-non-simple-params.ts
 pub struct AsyncArrowNonSimpleParamsVisitor;
@@ -27,7 +29,9 @@ fn rewrite_async_arrow_non_simple_params(arrow: &mut ArrowExpr) {
             span: DUMMY_SP,
             ctxt: arrow.ctxt,
             params: vec![],
-            body: Box::new(BlockStmtOrExpr::BlockStmt(body)),
+            body: Box::new(ArrowFunctionBody::FunctionBody(function_body_from_block(
+                body,
+            ))),
             is_async: true,
             is_generator: false,
             type_params: None,
@@ -35,7 +39,7 @@ fn rewrite_async_arrow_non_simple_params(arrow: &mut ArrowExpr) {
         });
 
         arrow.is_async = false;
-        *arrow.body = BlockStmtOrExpr::Expr(Box::new(call_expr(inner_async)));
+        *arrow.body = ArrowFunctionBody::Expr(Box::new(call_expr(inner_async)));
         return;
     }
 
@@ -79,7 +83,7 @@ fn rewrite_async_arrow_non_simple_params(arrow: &mut ArrowExpr) {
     let mut body = block_from_arrow_body(take_arrow_body(arrow));
     body.stmts.splice(0..0, init_stmts);
     arrow.params = new_params;
-    *arrow.body = BlockStmtOrExpr::BlockStmt(body);
+    *arrow.body = ArrowFunctionBody::FunctionBody(function_body_from_block(body));
 }
 
 fn undefined_ident() -> Expr {

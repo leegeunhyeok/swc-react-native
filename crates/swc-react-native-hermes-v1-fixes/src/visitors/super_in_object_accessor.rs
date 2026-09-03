@@ -7,6 +7,7 @@ pub struct SuperInObjectAccessorVisitor;
 impl VisitMut for SuperInObjectAccessorVisitor {
     fn visit_mut_getter_prop(&mut self, prop: &mut GetterProp) {
         if prop
+            .function
             .body
             .as_ref()
             .is_some_and(contains_direct_super_member_for_accessor)
@@ -19,6 +20,7 @@ impl VisitMut for SuperInObjectAccessorVisitor {
 
     fn visit_mut_setter_prop(&mut self, prop: &mut SetterProp) {
         if prop
+            .function
             .body
             .as_ref()
             .is_some_and(contains_direct_super_member_for_accessor)
@@ -30,7 +32,7 @@ impl VisitMut for SuperInObjectAccessorVisitor {
     }
 }
 
-fn contains_direct_super_member_for_accessor(body: &BlockStmt) -> bool {
+fn contains_direct_super_member_for_accessor(body: &FunctionBody) -> bool {
     let mut finder = DirectSuperMemberFinder::default();
     body.visit_with(&mut finder);
     finder.found

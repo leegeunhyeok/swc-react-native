@@ -23,6 +23,13 @@ pub(crate) fn binding(name: &str) -> Pat {
     Pat::Ident(id(name).into())
 }
 
+pub(crate) fn function_body_from_block(body: BlockStmt) -> FunctionBody {
+    FunctionBody {
+        span: body.span,
+        stmts: body.stmts,
+    }
+}
+
 #[inline]
 pub(crate) fn ident_expr(name: &str) -> Expr {
     Expr::Ident(id(name))
@@ -66,11 +73,12 @@ pub(crate) fn assign_member(target: &str, prop: &str, value: Expr) -> Stmt {
 pub(crate) fn const_named_fn(
     name: &str,
     params: Vec<Param>,
-    body: BlockStmt,
+    body: FunctionBody,
     is_generator: bool,
     is_async: bool,
 ) -> Stmt {
     let func = Function {
+        this_param: None,
         params,
         decorators: vec![],
         span: DUMMY_SP,

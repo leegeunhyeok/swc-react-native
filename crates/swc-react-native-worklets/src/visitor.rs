@@ -259,7 +259,7 @@ impl WorkletsVisitor {
         &mut self,
         func_name: Option<&str>,
         params: Vec<Param>,
-        mut body: BlockStmt,
+        mut body: FunctionBody,
         mut closure_vars: Vec<Ident>,
         is_generator: bool,
         is_async: bool,
@@ -390,6 +390,7 @@ impl WorkletsVisitor {
         let factory_fn = FnExpr {
             ident: Some(id(&format!("{worklet_name}Factory"))),
             function: Box::new(Function {
+                this_param: None,
                 params: vec![factory_param(
                     &closure_vars,
                     should_include_init_data.then_some(init_id.as_str()),
@@ -397,10 +398,9 @@ impl WorkletsVisitor {
                 decorators: vec![],
                 span: DUMMY_SP,
                 ctxt: Default::default(),
-                body: Some(BlockStmt {
+                body: Some(FunctionBody {
                     span: DUMMY_SP,
                     stmts,
-                    ctxt: Default::default(),
                 }),
                 is_generator: false,
                 is_async: false,
@@ -448,7 +448,7 @@ impl WorkletsVisitor {
         arrow: &mut ArrowExpr,
     ) -> Option<Expr> {
         let body = match arrow.body.as_mut() {
-            BlockStmtOrExpr::BlockStmt(b) => b,
+            ArrowFunctionBody::FunctionBody(b) => b,
             _ => return None,
         };
         if Self::is_already_workletized(&body.stmts) || !Self::has_worklet_directive(&body.stmts) {
@@ -465,11 +465,7 @@ impl WorkletsVisitor {
             })
             .collect();
         let body_c = body.clone();
-        let cv = collect_closure_vars_arrow(
-            &pats,
-            &BlockStmtOrExpr::BlockStmt(body_c.clone()),
-            &self.closure_ctx(),
-        );
+        let cv = collect_closure_vars_arrow(&pats, &arrow.body, &self.closure_ctx());
         Some(self.make_factory_call(name_hint, params, body_c, cv, false, arrow.is_async))
     }
 
@@ -504,7 +500,7 @@ impl WorkletsVisitor {
             Expr::Arrow(arrow) if accept_fn => {
                 ensure_block_body(arrow);
                 let body = match arrow.body.as_mut() {
-                    BlockStmtOrExpr::BlockStmt(b) => b,
+                    ArrowFunctionBody::FunctionBody(b) => b,
                     _ => return false,
                 };
                 if Self::is_already_workletized(&body.stmts) {
@@ -521,11 +517,7 @@ impl WorkletsVisitor {
                     })
                     .collect();
                 let body_c = body.clone();
-                let cv = collect_closure_vars_arrow(
-                    &pats,
-                    &BlockStmtOrExpr::BlockStmt(body_c.clone()),
-                    &self.closure_ctx(),
-                );
+                let cv = collect_closure_vars_arrow(&pats, &arrow.body, &self.closure_ctx());
                 let new = self.make_factory_call(None, params, body_c, cv, false, arrow.is_async);
                 *expr = new;
                 true
@@ -762,6 +754,7 @@ impl WorkletsVisitor {
             ident: factory_ident,
             declare: false,
             function: Box::new(Function {
+                this_param: None,
                 params: vec![],
                 decorators: vec![],
                 span: DUMMY_SP,
@@ -886,7 +879,7 @@ impl WorkletsVisitor {
         // The factory itself is appended *after* the clone, so the returned
         // object does not recursively contain a factory property.
         let cloned = obj.clone();
-        let factory_body = BlockStmt {
+        let factory_body = FunctionBody {
             span: DUMMY_SP,
             stmts: vec![
                 Stmt::Expr(ExprStmt {
@@ -898,11 +891,11 @@ impl WorkletsVisitor {
                     arg: Some(Box::new(Expr::Object(cloned))),
                 }),
             ],
-            ctxt: Default::default(),
         };
         let factory_method = MethodProp {
             key: PropName::Ident(IdentName::new(CONTEXT_OBJECT_FACTORY.into(), DUMMY_SP)),
             function: Box::new(Function {
+                this_param: None,
                 params: vec![],
                 decorators: vec![],
                 span: DUMMY_SP,
@@ -1516,7 +1509,7 @@ fn resolve_refs_in_nested_scopes_item(item: &mut ModuleItem) {
         ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(e)) => match &mut e.decl {
             DefaultDecl::Fn(fn_expr) => {
                 if let Some(body) = fn_expr.function.body.as_mut() {
-                    resolve_refs_in_block(body);
+                    resolve_refs_in_function_body(body);
                 }
             }
             DefaultDecl::Class(class_expr) => {
@@ -1564,7 +1557,7 @@ fn resolve_refs_in_nested_scopes_decl(decl: &mut Decl) {
     match decl {
         Decl::Fn(fd) => {
             if let Some(body) = fd.function.body.as_mut() {
-                resolve_refs_in_block(body);
+                resolve_refs_in_function_body(body);
             }
         }
         Decl::Var(v) => {
@@ -1583,12 +1576,12 @@ fn resolve_refs_in_nested_scopes_expr(expr: &mut Expr) {
     match expr {
         Expr::Fn(fn_expr) => {
             if let Some(body) = fn_expr.function.body.as_mut() {
-                resolve_refs_in_block(body);
+                resolve_refs_in_function_body(body);
             }
         }
         Expr::Arrow(arrow) => {
-            if let BlockStmtOrExpr::BlockStmt(b) = arrow.body.as_mut() {
-                resolve_refs_in_block(b);
+            if let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_mut() {
+                resolve_refs_in_function_body(body);
             }
         }
         Expr::Class(ce) => resolve_refs_in_class(&mut ce.class),
@@ -1601,12 +1594,12 @@ fn resolve_refs_in_class(class: &mut Class) {
         match m {
             ClassMember::Method(method) => {
                 if let Some(body) = method.function.body.as_mut() {
-                    resolve_refs_in_block(body);
+                    resolve_refs_in_function_body(body);
                 }
             }
             ClassMember::Constructor(c) => {
                 if let Some(body) = c.body.as_mut() {
-                    resolve_refs_in_block(body);
+                    resolve_refs_in_function_body(body);
                 }
             }
             ClassMember::ClassProp(p) => {
@@ -1620,15 +1613,23 @@ fn resolve_refs_in_class(class: &mut Class) {
 }
 
 fn resolve_refs_in_block(block: &mut BlockStmt) {
+    resolve_refs_in_stmts(&mut block.stmts);
+}
+
+fn resolve_refs_in_function_body(body: &mut FunctionBody) {
+    resolve_refs_in_stmts(&mut body.stmts);
+}
+
+fn resolve_refs_in_stmts(stmts: &mut [Stmt]) {
     // First, recurse deeper.
-    for stmt in &mut block.stmts {
+    for stmt in stmts.iter_mut() {
         resolve_refs_in_nested_scopes_stmt(stmt);
     }
     // Then, do binding resolution for references collected *within* this
     // scope against the bindings declared in this scope. Outer-scope
     // references to names not bound here fall through to outer resolution.
     let mut refs: indexmap::IndexMap<Atom, bool> = indexmap::IndexMap::new();
-    for stmt in block.stmts.iter() {
+    for stmt in stmts.iter() {
         collect_ref_names_stmt(stmt, &mut refs);
     }
     if refs.is_empty() {
@@ -1636,8 +1637,8 @@ fn resolve_refs_in_block(block: &mut BlockStmt) {
     }
     // Only act on references whose binding is present in this block.
     for (name, accept_obj) in refs {
-        if has_binding_for(&block.stmts, name.as_ref()) {
-            tag_best_binding_in_stmts(&mut block.stmts, name.as_ref(), accept_obj);
+        if has_binding_for(stmts, name.as_ref()) {
+            tag_best_binding_in_stmts(stmts, name.as_ref(), accept_obj);
         }
     }
 }
@@ -2008,7 +2009,7 @@ fn tag_expr_for_hook_ref(expr: &mut Expr, accept_obj: bool) {
         }
         Expr::Arrow(arrow) => {
             ensure_block_body(arrow);
-            if let BlockStmtOrExpr::BlockStmt(b) = arrow.body.as_mut() {
+            if let ArrowFunctionBody::FunctionBody(b) = arrow.body.as_mut() {
                 push_dir(b);
             }
         }
@@ -2136,19 +2137,18 @@ fn add_worklet_dir_expr(expr: &mut Expr) {
             }
         }
         Expr::Arrow(arrow) => match arrow.body.as_mut() {
-            BlockStmtOrExpr::BlockStmt(b) => push_dir(b),
-            BlockStmtOrExpr::Expr(inner) => {
+            ArrowFunctionBody::FunctionBody(b) => push_dir(b),
+            ArrowFunctionBody::Expr(inner) => {
                 let i = inner.clone();
-                let mut block = BlockStmt {
+                let mut body = FunctionBody {
                     span: DUMMY_SP,
                     stmts: vec![Stmt::Return(ReturnStmt {
                         span: DUMMY_SP,
                         arg: Some(i),
                     })],
-                    ctxt: Default::default(),
                 };
-                push_dir(&mut block);
-                *arrow.body = BlockStmtOrExpr::BlockStmt(block);
+                push_dir(&mut body);
+                *arrow.body = ArrowFunctionBody::FunctionBody(body);
             }
         },
         Expr::Object(obj) => add_worklet_dir_object(obj),
@@ -2265,13 +2265,13 @@ impl Visit for ThisFinder {
     // Arrow functions *do* inherit `this`, so keep recursing through them.
 }
 
-fn push_dir(block: &mut BlockStmt) {
-    if !block
+fn push_dir(body: &mut FunctionBody) {
+    if !body
         .stmts
         .iter()
         .any(|s| str_stmt_value(s) == Some(WORKLET_DIRECTIVE))
     {
-        block.stmts.insert(
+        body.stmts.insert(
             0,
             Stmt::Expr(ExprStmt {
                 span: DUMMY_SP,
@@ -2307,7 +2307,7 @@ fn to_posix_path(path: &str) -> String {
 ///     for-loop vars) shadow `from` within the remaining body
 ///   - nested functions that re-declare `from` as a parameter or local shadow
 ///     it within their own scope
-fn rename_free_refs(body: &mut BlockStmt, from: &str, to: &str) -> bool {
+fn rename_free_refs(body: &mut FunctionBody, from: &str, to: &str) -> bool {
     let mut declared: IndexSet<Atom> = IndexSet::new();
     let mut decl_collector = DeclCollector {
         declared: &mut declared,
@@ -2398,7 +2398,7 @@ impl VisitMut for FreeRefRenamer {
                 if let PropName::Computed(c) = &mut g.key {
                     c.expr.visit_mut_with(self);
                 }
-                if let Some(body) = g.body.as_mut() {
+                if let Some(body) = g.function.body.as_mut() {
                     body.visit_mut_with(self);
                 }
             }
@@ -2407,10 +2407,12 @@ impl VisitMut for FreeRefRenamer {
                     c.expr.visit_mut_with(self);
                 }
                 let mut extras: IndexSet<Atom> = IndexSet::new();
-                collect_pat_bindings(&s.param, &mut extras);
+                for param in &s.function.params {
+                    collect_pat_bindings(&param.pat, &mut extras);
+                }
                 let extras_vec: Vec<Atom> = extras.into_iter().collect();
                 self.with_inner(&extras_vec, |v| {
-                    if let Some(body) = s.body.as_mut() {
+                    if let Some(body) = s.function.body.as_mut() {
                         body.visit_mut_with(v);
                     }
                 });
@@ -2465,12 +2467,12 @@ impl VisitMut for FreeRefRenamer {
         for p in &node.params {
             collect_pat_bindings(p, &mut extras);
         }
-        if let BlockStmtOrExpr::BlockStmt(block) = &*node.body {
+        if let ArrowFunctionBody::FunctionBody(body) = &*node.body {
             let mut dc = DeclCollector {
                 declared: &mut extras,
                 depth: 0,
             };
-            block.visit_with(&mut dc);
+            body.visit_with(&mut dc);
         }
         let extras_vec: Vec<Atom> = extras.into_iter().collect();
         self.with_inner(&extras_vec, |v| {
@@ -2617,7 +2619,7 @@ fn strip_class_factory_suffix(name: &str) -> Option<&str> {
 /// Mirrors the `NewExpression` traversal in
 /// `react-native-reanimated/packages/react-native-worklets/plugin/src/workletFactory.ts`'s
 /// `getClosure`.
-fn substitute_worklet_class_news(body: &mut BlockStmt, closure_vars: &mut Vec<Ident>) {
+fn substitute_worklet_class_news(body: &mut FunctionBody, closure_vars: &mut Vec<Ident>) {
     if closure_vars.is_empty() {
         return;
     }
@@ -2863,7 +2865,7 @@ fn build_class_factory_body(
     class_ident: &Ident,
     factory_ident: &Ident,
     class_node: Box<Class>,
-) -> BlockStmt {
+) -> FunctionBody {
     // Lower `class <Name> { ... }` to an ES5 constructor function so the
     // serialized worklet `init_data.code` doesn't carry raw class syntax.
     // Hermes 0.14's worklet runtime eval refuses the `class` keyword,
@@ -2914,9 +2916,8 @@ fn build_class_factory_body(
     stmts.push(assign_back_stmt);
     stmts.push(return_stmt);
 
-    BlockStmt {
+    FunctionBody {
         span: DUMMY_SP,
-        ctxt: Default::default(),
         stmts,
     }
 }
@@ -3010,13 +3011,13 @@ fn lower_class_to_constructor_fn(class_ident: &Ident, class_node: Box<Class>) ->
     body_stmts.extend(ctor_body_stmts);
 
     let func = Function {
+        this_param: None,
         params: ctor_params,
         decorators: vec![],
         span: DUMMY_SP,
         ctxt: Default::default(),
-        body: Some(BlockStmt {
+        body: Some(FunctionBody {
             span: DUMMY_SP,
-            ctxt: Default::default(),
             stmts: body_stmts,
         }),
         is_generator: false,
@@ -3268,15 +3269,14 @@ fn is_reserved_word(name: &str) -> bool {
 }
 
 fn ensure_block_body(arrow: &mut ArrowExpr) {
-    if let BlockStmtOrExpr::Expr(e) = arrow.body.as_mut() {
+    if let ArrowFunctionBody::Expr(e) = arrow.body.as_mut() {
         let inner = e.clone();
-        *arrow.body = BlockStmtOrExpr::BlockStmt(BlockStmt {
+        *arrow.body = ArrowFunctionBody::FunctionBody(FunctionBody {
             span: DUMMY_SP,
             stmts: vec![Stmt::Return(ReturnStmt {
                 span: DUMMY_SP,
                 arg: Some(inner),
             })],
-            ctxt: Default::default(),
         });
     }
 }
@@ -3288,14 +3288,14 @@ fn ensure_block_body(arrow: &mut ArrowExpr) {
 struct StripDirectivePrologues;
 
 impl VisitMut for StripDirectivePrologues {
-    fn visit_mut_block_stmt(&mut self, block: &mut BlockStmt) {
-        let directive_end = block
+    fn visit_mut_function_body(&mut self, body: &mut FunctionBody) {
+        let directive_end = body
             .stmts
             .iter()
             .take_while(|stmt| str_stmt_value(stmt).is_some())
             .count();
-        block.stmts.drain(..directive_end);
-        block.visit_mut_children_with(self);
+        body.stmts.drain(..directive_end);
+        body.visit_mut_children_with(self);
     }
 }
 
@@ -3306,7 +3306,7 @@ impl VisitMut for StripDirectivePrologues {
 fn build_worklet_code_and_map(
     worklet_name: &str,
     params: &[Param],
-    body: &BlockStmt,
+    body: &FunctionBody,
     cv: &[Ident],
     is_generator: bool,
     is_async: bool,
@@ -3320,14 +3320,14 @@ fn build_worklet_code_and_map(
     let fn_expr = Expr::Fn(FnExpr {
         ident: Some(id(worklet_name)),
         function: Box::new(Function {
+            this_param: None,
             params: params.to_vec(),
             decorators: vec![],
             span: DUMMY_SP,
             ctxt: Default::default(),
-            body: Some(BlockStmt {
+            body: Some(FunctionBody {
                 span: DUMMY_SP,
                 stmts,
-                ctxt: Default::default(),
             }),
             is_generator,
             is_async,

@@ -2,7 +2,7 @@ use swc_common::{SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
-use crate::ast::{call_expr, var_decl_stmt};
+use crate::ast::{call_expr, function_body_from_block, var_decl_stmt};
 
 /// Source: https://github.com/expo/expo/blob/d427a802b11d79c8e45be8ceb582ca10fae103af/packages/babel-preset-expo/src/plugins/fix-hermes-v1-class-in-finally.ts
 #[derive(Default)]
@@ -56,7 +56,7 @@ impl VisitMut for ClassInFinallyVisitor {
                     span: DUMMY_SP,
                     ctxt: SyntaxContext::empty(),
                     params: vec![],
-                    body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Class(
+                    body: Box::new(ArrowFunctionBody::Expr(Box::new(Expr::Class(
                         class_expr.clone(),
                     )))),
                     is_async: false,
@@ -117,17 +117,19 @@ fn class_decl_in_finalizer_stmt(class_decl: &ClassDecl) -> Stmt {
         span: DUMMY_SP,
         ctxt: SyntaxContext::empty(),
         params: vec![],
-        body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
-            span: DUMMY_SP,
-            ctxt: SyntaxContext::empty(),
-            stmts: vec![
-                inner,
-                Stmt::Return(ReturnStmt {
-                    span: DUMMY_SP,
-                    arg: Some(Box::new(Expr::Ident(ident.clone()))),
-                }),
-            ],
-        })),
+        body: Box::new(ArrowFunctionBody::FunctionBody(function_body_from_block(
+            BlockStmt {
+                span: DUMMY_SP,
+                ctxt: SyntaxContext::empty(),
+                stmts: vec![
+                    inner,
+                    Stmt::Return(ReturnStmt {
+                        span: DUMMY_SP,
+                        arg: Some(Box::new(Expr::Ident(ident.clone()))),
+                    }),
+                ],
+            },
+        ))),
         is_async: false,
         is_generator: false,
         type_params: None,

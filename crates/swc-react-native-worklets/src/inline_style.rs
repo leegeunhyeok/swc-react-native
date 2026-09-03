@@ -9,7 +9,7 @@ use swc_common::DUMMY_SP;
 use swc_ecma_ast::*;
 use swc_ecma_utils::ExprFactory;
 
-use crate::factory::{ident_expr, ident_name, str_lit};
+use crate::factory::{function_body_from_block, ident_expr, ident_name, str_lit};
 use crate::visitor::prop_name_str;
 
 pub(crate) fn warn_obj(obj: &mut ObjectLit) {
@@ -76,7 +76,9 @@ fn inline_style_warning(orig: Expr) -> Expr {
         span: DUMMY_SP,
         ctxt: Default::default(),
         params: vec![],
-        body: Box::new(BlockStmtOrExpr::BlockStmt(body)),
+        body: Box::new(ArrowFunctionBody::FunctionBody(function_body_from_block(
+            body,
+        ))),
         is_async: false,
         is_generator: false,
         type_params: None,

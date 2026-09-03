@@ -35,7 +35,7 @@ pub struct ClosureCtx<'a> {
 /// bindings emitted into the factory's IIFE argument.
 pub fn collect_closure_vars(
     params: &[Param],
-    body: &BlockStmt,
+    body: &FunctionBody,
     ctx: &ClosureCtx<'_>,
 ) -> Vec<Ident> {
     let mut declared = IndexSet::new();
@@ -64,7 +64,7 @@ pub fn collect_closure_vars(
 /// Same but for ArrowFunctionExpression with either a block or expression body.
 pub fn collect_closure_vars_arrow(
     params: &[Pat],
-    body: &BlockStmtOrExpr,
+    body: &ArrowFunctionBody,
     ctx: &ClosureCtx<'_>,
 ) -> Vec<Ident> {
     let mut declared = IndexSet::new();
@@ -75,21 +75,21 @@ pub fn collect_closure_vars_arrow(
     }
 
     match body {
-        BlockStmtOrExpr::BlockStmt(block) => {
+        ArrowFunctionBody::FunctionBody(body) => {
             let mut decl_collector = DeclCollector {
                 declared: &mut declared,
                 depth: 0,
             };
-            block.visit_with(&mut decl_collector);
+            body.visit_with(&mut decl_collector);
 
             let mut ref_collector = RefCollector {
                 declared: &declared,
                 ctx,
                 referenced: &mut referenced,
             };
-            block.visit_with(&mut ref_collector);
+            body.visit_with(&mut ref_collector);
         }
-        BlockStmtOrExpr::Expr(expr) => {
+        ArrowFunctionBody::Expr(expr) => {
             let mut ref_collector = RefCollector {
                 declared: &declared,
                 ctx,
@@ -298,30 +298,13 @@ impl Visit for RefCollector<'_> {
                         if let PropName::Computed(c) = &g.key {
                             c.expr.visit_with(self);
                         }
-                        if let Some(body) = &g.body {
-                            let inner_declared = self.declared.clone();
-                            let mut inner_ref = RefCollector {
-                                declared: &inner_declared,
-                                ctx: self.ctx,
-                                referenced: self.referenced,
-                            };
-                            body.visit_with(&mut inner_ref);
-                        }
+                        self.visit_function_in_new_scope(&g.function);
                     }
                     Prop::Setter(s) => {
                         if let PropName::Computed(c) = &s.key {
                             c.expr.visit_with(self);
                         }
-                        if let Some(body) = &s.body {
-                            let mut inner_declared = self.declared.clone();
-                            collect_pat_bindings(&s.param, &mut inner_declared);
-                            let mut inner_ref = RefCollector {
-                                declared: &inner_declared,
-                                ctx: self.ctx,
-                                referenced: self.referenced,
-                            };
-                            body.visit_with(&mut inner_ref);
-                        }
+                        self.visit_function_in_new_scope(&s.function);
                     }
                     Prop::Assign(a) => {
                         a.value.visit_with(self);
@@ -398,20 +381,20 @@ impl Visit for RefCollector<'_> {
             collect_pat_bindings(pat, &mut inner_declared);
         }
         match &*node.body {
-            BlockStmtOrExpr::BlockStmt(block) => {
+            ArrowFunctionBody::FunctionBody(body) => {
                 let mut inner_decl = DeclCollector {
                     declared: &mut inner_declared,
                     depth: 0,
                 };
-                block.visit_with(&mut inner_decl);
+                body.visit_with(&mut inner_decl);
                 let mut inner_ref = RefCollector {
                     declared: &inner_declared,
                     ctx: self.ctx,
                     referenced: self.referenced,
                 };
-                block.visit_with(&mut inner_ref);
+                body.visit_with(&mut inner_ref);
             }
-            BlockStmtOrExpr::Expr(expr) => {
+            ArrowFunctionBody::Expr(expr) => {
                 let mut inner_ref = RefCollector {
                     declared: &inner_declared,
                     ctx: self.ctx,
